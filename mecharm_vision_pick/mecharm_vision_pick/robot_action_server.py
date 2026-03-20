@@ -1,3 +1,4 @@
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer
@@ -9,7 +10,10 @@ from my_mecharm_interfaces.msg import Tag, TagArray
 from pymycobot import MechArm270
 import time
 
-
+POSE1_MIN  = -0.06   # pose[1] 최솟값
+POSE1_MAX  =  0.06   # pose[1] 최댓값
+DELTA_MIN  = -35.0   # pose[1] 최솟값일 때 joint5 delta
+DELTA_MAX  = -10.0   # pose[1] 최댓값일 때 joint5 delta
 class RobotActionServer(Node):
 
     def __init__(self):
@@ -29,6 +33,8 @@ class RobotActionServer(Node):
         self.mc = MechArm270('/dev/ttyACM0',115200)
 
         self.ready_pos = [0,0,-30,0,100,0]
+        self.place_pos = [0, 75, -70, 0, 60, 0]
+        self.pick_pos = [0, 70.13, -70, 0, 82.26, 0]
         self.robot_speed = 30
         
         self.tag_sub = self.create_subscription(
@@ -43,11 +49,6 @@ class RobotActionServer(Node):
         self.detected_tags.clear()
         for tag in msg.tags:
             self.detected_tags[tag.id] = tag.pose
-            
-    def pose_to_coord_xy(self, px, py):
-        coord_x = 165.36 * px - 722.66 * py + 240.53
-        coord_y = -676.80 * px - 221.30 * py + 15.30
-        return coord_x, coord_y
 
     async def execute_callback(self, goal_handle):
         cmd = goal_handle.request.command
@@ -83,7 +84,6 @@ class RobotActionServer(Node):
                     return result
                 tag_pose = self.detected_tags[tag_id]
                 px, py = tag_pose[0], tag_pose[1]
-
                 self.get_logger().info(f"Tag {tag_id} pose = {tag_pose}")
 
                 feedback.status = "opening_gripper"
@@ -98,24 +98,37 @@ class RobotActionServer(Node):
                 feedback.status = "moving_above_tag"
                 goal_handle.publish_feedback(feedback)
 
-                coord_x, coord_y = self.pose_to_coord_xy(px, py)
-
-                self.get_logger().info(f"target coord = ({coord_x:.1f}, {coord_y:.1f})")
-
-                self.mc.send_coords([coord_x, coord_y, 140, 179.9, 3.33, 176.75], self.robot_speed)
+                self.mc.send_angles(self.pick_pos, self.robot_speed)
                 time.sleep(2)
 
                 feedback.status = "descending"
                 goal_handle.publish_feedback(feedback)
 
-                self.mc.send_coords([coord_x, coord_y, 110, 179.9, 3.33, 176.75], self.robot_speed)
-                time.sleep(2)
+                now_angles = self.mc.get_angles()
+                t = (np.clip(py, POSE1_MIN, POSE1_MAX) - POSE1_MIN) / (POSE1_MAX - POSE1_MIN)
+                delta = DELTA_MIN + t * (DELTA_MAX - DELTA_MIN)
+                now_angles[4] += delta
+                
+                print(f"py={py:.3f}, delta={delta:.1f}, joint5={now_angles[4]:.1f}")
+                        
+                self.mc.set_movement_type(1)
+                    
+                self.mc.send_angles(now_angles, 30)
+                time.sleep(1)
+                
+                if delta <= -30:
+                    now_angles[1] += 5
+                    now_angles[4] += delta
+                    # now_angles[4] += 10
+                
+                self.mc.send_angles(now_angles, 30)
+                time.sleep(1)
 
                 feedback.status = "grasping"
                 goal_handle.publish_feedback(feedback)
 
                 self.mc.set_gripper_value(0, 50, 1)
-                time.sleep(2)
+                time.sleep(1)
                 
                 if self.mc.get_gripper_value() <= 10:
                     self.get_logger().info(f"Gripper value: {self.mc.get_gripper_value()}")
@@ -132,7 +145,7 @@ class RobotActionServer(Node):
                 feedback.status = "moving_to_place"
                 goal_handle.publish_feedback(feedback)
 
-                self.mc.send_angles([0, 50, -35, 0, 70, 0], self.robot_speed)
+                self.mc.send_angles(self.place_pos, self.robot_speed)
                 time.sleep(2)
 
                 feedback.status = "release_object"
